@@ -24,9 +24,11 @@ to clinically validated.
 |---|---|
 | `tools.py` | The triage logic and mock condition knowledge base. `RED_FLAG_SYMPTOMS` is the deterministic override; `assess_symptoms` / `escalate_to_care` are pure, offline-testable functions with no API calls. |
 | `manual_loop.py` | A raw Claude API agentic loop (`stop_reason` inspection, tool dispatch, message loop) that wraps `tools.py` as tools for a live agent. |
+| `agent_sdk_bot.py` | The same agent built on the real Claude Agent SDK instead of a hand-rolled loop: `tools.py`'s functions become SDK MCP tools via `@tool`/`create_sdk_mcp_server`, plus a third tool, `finalize_triage`, that the model must call to deliver its answer. A `PreToolUse` hook on `finalize_triage` (`build_red_flag_floor_hook`) is a *second, independent* safety layer — it re-reads the session's actual computed `triage_level` and denies the call if the model's proposed level is less urgent, catching the model mis-relaying a correct result rather than `tools.py` computing a wrong one. |
 | `conftest.py` | Offline test guards — strips `ANTHROPIC_API_KEY` and blocks outbound sockets for every test, so the suite behaves the same with or without a key. |
 | `tests/conftest.py` | Puts the repo root on `sys.path` for `tests/` (this repo isn't a package, since `manual_loop.py` needs a flat `from tools import ...`). |
 | `tests/test_tools.py` | Offline tests covering the red-flag override (including when it must beat a low-urgency candidate match), triage-confidence thresholds, the `assess_symptoms` → `escalate_to_care` prerequisite gate, and the disclaimer contract. |
+| `tests/test_agent_sdk_bot.py` | Offline tests for the `PreToolUse` hook's decision logic — pure async functions, dicts in/dicts out, no CLI subprocess or network — covering the deny/allow cases including a model trying to downgrade an `er-now` result to `self-care`. |
 
 ## Setup
 
@@ -54,10 +56,21 @@ Live, raw API loop:
 python3 manual_loop.py
 ```
 
+Live, Agent SDK bot (requires the `claude-agent-sdk` package, which shells
+out to the Claude Code CLI):
+
+```bash
+python3 agent_sdk_bot.py
+```
+
 The default prompt reports cold symptoms (self-care). Try editing it to
 include `"chest pain"` alongside otherwise mild symptoms, and watch the
 triage level come back `er-now` regardless — that's `RED_FLAG_SYMPTOMS`
-overriding the candidate match, not the model deciding to be cautious.
+overriding the candidate match, not the model deciding to be cautious. In
+`agent_sdk_bot.py` you can additionally test the second safety layer: patch
+`finalize_triage_tool` (or just watch the hook's deny reason in stderr) to
+confirm a model call that tries to soften an `er-now` result gets rejected
+before it ever reaches the user.
 
 ## What to look for while testing
 
@@ -74,3 +87,11 @@ overriding the candidate match, not the model deciding to be cautious.
 - Try `manual_loop.py` with a prompt that includes a red-flag symptom and
   see whether the model relays `triage_level: "er-now"` faithfully per the
   system prompt's instruction, or whether it hedges.
+- In `agent_sdk_bot.py`, the red-flag override exists at two independent
+  layers: `tools.py`'s `RED_FLAG_SYMPTOMS` check (same as above) computes
+  the correct `triage_level`, and `build_red_flag_floor_hook`'s
+  `PreToolUse` hook separately verifies that whatever the model passes to
+  `finalize_triage` isn't a downgrade from that computed value. Comment out
+  either one independently and the corresponding tests should fail — they
+  guard against different failure modes and neither can substitute for the
+  other.
